@@ -27,11 +27,13 @@ import os
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import (QListWidgetItem, QMessageBox, QProgressDialog, QApplication)
+from qgis.PyQt.QtWidgets import (
+    QListWidgetItem, QMessageBox, QProgressDialog, QApplication
+)
 
-from qgis.core import (QgsProject, QgsWkbTypes, QgsMapLayer)
+from qgis.core import (QgsProject, QgsWkbTypes, QgsMapLayer, QgsSettings)
 
-import geometry as gp
+from . import geometry_processing as gp
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(
@@ -42,7 +44,28 @@ FORM_CLASS, _ = uic.loadUiType(
     import_from='ratf_qgis')
 
 
+def _s(n):
+    """Retourne 's' si n > 1, sinon une chaîne vide (accord français :
+    0 et 1 restent au singulier, comme dans '0 erreur' / '1 erreur' /
+    '2 erreurs')."""
+    return "s" if n > 1 else ""
+
+
 class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
+
+    # Noms des widgets de paramètres (cases à cocher + valeurs numériques)
+    # dont l'état doit persister d'une ouverture du plugin à l'autre.
+    _PARAM_WIDGETS = [
+        "chkVerifyMinVertex", "chkCorrectMinVertex",
+        "chkVerifyMaxVertex", "chkCorrectMaxVertex",
+        "chkDetectSegIntra", "chkShowSegIntra",
+        "chkDetectSegInter", "chkShowSegInter",
+        "chkDetectAnglesInternes", "chkShowAngles",
+        "spnMinVertexDistance", "spnMaxVertexDistance",
+        "spnSegmentsIntra", "spnSegmentsInter",
+        "spnAnglesInternes", "spinSuperficieMin",
+    ]
+
     def __init__(self, parent=None):
         """Constructor."""
         super(RatfQgisDialog, self).__init__(parent)
@@ -56,30 +79,87 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         # Charger les couches polygonales
         self.load_polygon_layers()
 
+        # Restaurer les paramètres de la dernière utilisation
+        self._load_parametres()
+
         # Connexion des signaux
         self.lstPolygonLayers.itemChanged.connect(self.on_layer_checked)
         self.btnExecute.clicked.connect(self.on_execute_clicked)
         self.btnClose.clicked.connect(self.close)
 
-    def load_polygon_layers(self):
-        """Charge toutes les couches polygonales du projet dans la liste."""
+    def _load_parametres(self):
+        """Restaure les cases à cocher et valeurs numériques enregistrées
+        lors de la dernière utilisation du plugin (QgsSettings). Si aucun
+        réglage n'a encore été enregistré, la valeur actuelle du widget
+        (celle définie dans le .ui) sert de valeur par défaut."""
+        settings = QgsSettings()
+        settings.beginGroup("ratf_qgis/parametres")
+        for name in self._PARAM_WIDGETS:
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            if hasattr(widget, "isChecked"):
+                widget.setChecked(settings.value(name, widget.isChecked(), type=bool))
+            elif hasattr(widget, "value"):
+                valeur_defaut = widget.value()
+                valeur = settings.value(name, valeur_defaut, type=type(valeur_defaut))
+                widget.setValue(valeur)
+        settings.endGroup()
 
+    def _save_parametres(self):
+        """Enregistre l'état actuel des cases à cocher et valeurs
+        numériques (QgsSettings), pour les restaurer à la prochaine
+        ouverture du plugin."""
+        settings = QgsSettings()
+        settings.beginGroup("ratf_qgis/parametres")
+        for name in self._PARAM_WIDGETS:
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            if hasattr(widget, "isChecked"):
+                settings.setValue(name, widget.isChecked())
+            elif hasattr(widget, "value"):
+                settings.setValue(name, widget.value())
+        settings.endGroup()
+
+    def closeEvent(self, event):
+        """Sauvegarde les paramètres à la fermeture du dialogue, que ce
+        soit via le bouton « Fermer » ou la croix de la fenêtre."""
+        self._save_parametres()
+        super(RatfQgisDialog, self).closeEvent(event)
+
+    def load_polygon_layers(self, layer_a_selectionner=None):
+        """Charge toutes les couches polygonales du projet dans la liste.
+ 
+        Si `layer_a_selectionner` est fourni, cette couche est re-cochée
+        après le rechargement — utile pour rafraîchir la liste en cours
+        d'utilisation (ex. après l'ajout d'une couche corrigée) sans faire
+        perdre la sélection en cours."""
+ 
+        # Éviter que le recochage ci-dessous ne déclenche on_layer_checked
+        # pendant qu'on reconstruit la liste.
+        self.lstPolygonLayers.blockSignals(True)
+ 
         # Vider la liste
         self.lstPolygonLayers.clear()
-
+ 
         # Parcourir toutes les couches du projet
         for layer in QgsProject.instance().mapLayers().values():
-
+ 
             # Vérifier que c'est une couche vecteur polygonale
             if layer.type() == QgsMapLayer.VectorLayer and \
                     layer.geometryType() == QgsWkbTypes.PolygonGeometry:
                 
                 item = QListWidgetItem(layer.name())                                       
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
+                coche = (layer_a_selectionner is not None
+                         and layer.id() == layer_a_selectionner.id())
+                item.setCheckState(Qt.Checked if coche else Qt.Unchecked)
                 # Sauvegarder directement la couche
                 item.setData(Qt.UserRole, layer)
                 self.lstPolygonLayers.addItem(item)
+ 
+        self.lstPolygonLayers.blockSignals(False)
 
     def on_layer_checked(self, current_item):
         """Permet une seule couche sélectionnée à la fois."""
@@ -125,29 +205,43 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
-        rapport = [f"--- Couche : {layer.name()} ---"]
+        rapport = [f"Opération terminée"]
         step = 0
 
         # Anomalies normalisées de tous les contrôles "Détecter / Montrer",
         # accumulées ici pour être affichées dans une seule couche à la fin.
         anomalies_detectees = []
 
+        # Couche cible des CORRECTIONS uniquement (pour les enchaîner entre
+        # elles sans dupliquer la couche à chaque étape). Les CONTRÔLES DE
+        # DÉTECTION (check_*), eux, portent toujours sur `layer` d'origine :
+        # on a confirmé, en comparant point par point avec l'outil de
+        # référence (coordonnées identiques à la géométrie non corrigée),
+        # que ses détections ne sont jamais chaînées sur une correction
+        # précédente au sein d'une même exécution. `layer` lui-même n'est
+        # jamais modifié ; seule `couche_courante` (la copie mémoire) l'est.
+        couche_courante = layer
+        couche_corrigee = False
+
         # 1. Distance minimale entre les sommets
         if self.chkVerifyMinVertex.isChecked() or self.chkCorrectMinVertex.isChecked():
             val = self.spnMinVertexDistance.value()
-
             if self.chkVerifyMinVertex.isChecked():
                 issues = gp.check_min_vertex_distance(layer, val, min_area_ha)
-                rapport.append(f"  Distance min. entre sommets : {len(issues)} anomalie(s) détectée(s)")
-
+                n = len(issues)
+                rapport.append(
+                    f"{n} erreur{_s(n)} de distance min. détectée{_s(n)} sur la couche « {layer.name()} »")
                 if issues:
                     anomalies_detectees.extend(gp.normalize_issues(
-                        issues, "Distance min. entre sommets, value_key="distance,
+                        issues, "Distance min. entre sommets", value_key="distance",
                         fid_key="fid", value_suffix=" m"))
-                    
             if self.chkCorrectMinVertex.isChecked():
-                n = gp.correct_min_vertex_distance(layer, val, min_area_ha)
-                rapport.append(f"  Distance min. entre sommets : {n} entit(s) corrigée(s)")
+                target = couche_courante if couche_corrigee else None
+                couche_courante, n_corr = gp.correct_min_vertex_distance(
+                    couche_courante, val, min_area_ha, target_layer=target)
+                couche_corrigee = True
+                rapport.append(
+                    f"{n_corr} erreur{_s(n_corr)} de distance min. entre sommets corrigée{_s(n_corr)}")
         step += 1
         progress.setValue(step)
         QApplication.processEvents()
@@ -157,22 +251,25 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         # 2. Distance maximale entre les sommets
         if self.chkVerifyMaxVertex.isChecked() or self.chkCorrectMaxVertex.isChecked():
             val = self.spnMaxVertexDistance.value()
-
             if self.chkVerifyMaxVertex.isChecked():
                 issues = gp.check_max_vertex_distance(layer, val, min_area_ha)
-                rapport.append(f"  Distance max. entre sommets : {len(issues)} anomalie(s) détectée(s)")
-
+                n = len(issues)
+                rapport.append(
+                    f"{n} erreur{_s(n)} de distance max. détectée{_s(n)} sur la couche « {layer.name()} »")
                 if issues:
                     anomalies_detectees.extend(gp.normalize_issues(
                         issues, "Distance max. entre sommets", value_key="distance",
                         fid_key="fid", value_suffix=" m"))
-
             if self.chkCorrectMaxVertex.isChecked():
-                n = gp.correct_max_vertex_distance(layer, val, min_area_ha)
-                rapport.append(f"  Distance max. entre sommets : {n} entité(s) corrigée(s)")
+                target = couche_courante if couche_corrigee else None
+                couche_courante, n_corr = gp.correct_max_vertex_distance(
+                    couche_courante, val, min_area_ha, target_layer=target)
+                couche_corrigee = True
+                rapport.append(
+                    f"{n_corr} erreur{_s(n_corr)} de distance max. entre sommets corrigée{_s(n_corr)}")
         step +=1
         progress.setValue(step)
-        QApplication.proccesEvents()
+        QApplication.processEvents()
         if progress.wasCanceled():
             return
         
@@ -180,7 +277,10 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         if self.chkDetectSegIntra.isChecked():
             val = self.spnSegmentsIntra.value()
             issues = gp.check_intra_geometry_proximity(layer, val, min_area_ha)
-            rapport.append(f"  Proximité intra-géométrie : {len(issues)} anomalie(s) détectée(s)")
+            n = len(issues)
+            rapport.append(
+                f"{n} erreur{_s(n)} de proximité des segments intra-géométrie "
+                f"détectée{_s(n)} sur la couche « {layer.name()} »")
 
             if self.chkShowSegIntra.isChecked() and issues:
                 anomalies_detectees.extend(gp.normalize_issues(
@@ -194,10 +294,13 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
             return
         
         # 4. Proximité des segments inter-géométrie
-        if self.chkDetectSehInter.isChecked():
+        if self.chkDetectSegInter.isChecked():
             val = self.spnSegmentsInter.value()
             issues = gp.check_inter_geometry_proximity(layer, val, min_area_ha)
-            rapport.append(f"  Proximité inter-géométrie : {len(issues)} anomalie(s) détectée(s)")
+            n = len(issues)
+            rapport.append(
+                f"{n} erreur{_s(n)} de proximité des segments inter-géométrie "
+                f"détectée{_s(n)} sur la couche « {layer.name()} »")
 
             if self.chkShowSegInter.isChecked() and issues:
                 anomalies_detectees.extend(gp.normalize_issues(
@@ -214,7 +317,10 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         if self.chkDetectAnglesInternes.isChecked():
             val = self.spnAnglesInternes.value()
             issues = gp.check_internal_angles(layer, val, min_area_ha)
-            rapport.append(f"  Angles interne < {val}° : {len(issues)} anomalie(s) détectée(s)")
+            n = len(issues)
+            rapport.append(
+                f"{n} erreur{_s(n)} d'angle interne de bordure "
+                f"détectée{_s(n)} sur la couche « {layer.name()} »")
 
             if self.chkShowAngles.isChecked() and issues:
                 anomalies_detectees.extend(gp.normalize_issues(
@@ -222,20 +328,32 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
                     fid_key="fid", value_suffix="°"
                 ))
         step +=1
-        progress.setValues(step)
+        progress.setValue(step)
+
+        # Si une correction a eu lieu, ajouter la couche corrigée au projet
+        # pour que les fid référencés dans la couche d'anomalies ci-dessous
+        # (basés sur couche_courante) pointent vers une couche visible.
+        if couche_corrigee:
+            QgsProject.instance().addMapLayer(couche_courante)
+            # Rafraîchir la liste des couches du plugin pour que la couche
+            # corrigée y apparaisse immédiatement, sans devoir rouvrir le
+            # dialogue. La couche d'origine reste sélectionnée.
+            self.load_polygon_layers(layer_a_selectionner=layer)
 
         # Couche unique regroupant toutes les anomalies, distinguées par le champ "type".
         if anomalies_detectees:
             couche_erreurs = gp.build_combined_point_layer(
-                anomalies_detectees, layer.crs(), f"{layer_name()}_erreurs_detectees")
+                anomalies_detectees, couche_courante.crs(),
+                f"{couche_courante.name()}_erreurs_detectees")
             
             if couche_erreurs is not None:
                 QgsProject.instance().addMapLayer(couche_erreurs)
-                rapport.append(
-                    f"\n {len(anomalies_detectees)} anomalie(s) affichée(s) dans la couche"
-                    f"« {couche_erreurs.name()} »")
+                gp.apply_error_type_symbology(couche_erreurs, field_name="type")
+
                 
-        layer.triggerRepaint()
+        couche_courante.triggerRepaint()
+
+        self._save_parametres()
 
         QMessageBox.information(self, "Géométrie RATF - Rapport", "\n".join(rapport))
 

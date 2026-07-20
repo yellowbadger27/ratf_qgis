@@ -26,15 +26,21 @@ proximité de segments (les plus coûteux en calcul).
 import math
 
 from qgis.core import (
+    QgsCategorizedSymbolRenderer,
     QgsFeature,
     QgsField,
     QgsFields,
     QgsGeometry,
+    QgsMarkerSymbol,
     QgsPointXY,
+    QgsProject,
+    QgsRendererCategory,
     QgsSpatialIndex,
     QgsVectorLayer,
+    QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtGui import QColor
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +88,40 @@ def _features_to_process(layer, min_area_ha):
             yield feature
 
 
+def unique_layer_name(base_name):
+    """Retourne un nom de couche disponible dans le projet, basé sur
+    `base_name`. Le premier essai est `base_name` tel quel ; s'il est
+    déjà pris, un suffixe numérique est ajouté à partir de 2
+    (ex. "X_corrige", puis "X_corrige2", "X_corrige3", ...)."""
+    if not QgsProject.instance().mapLayersByName(base_name):
+        return base_name
+    i = 2
+    while QgsProject.instance().mapLayersByName(f"{base_name}{i}"):
+        i += 1
+    return f"{base_name}{i}"
+
+
+def _duplicate_layer(layer, name):
+    """Duplique `layer` (structure + entités) dans une nouvelle couche
+    mémoire, sans toucher à la couche source. Sert de base aux fonctions
+    de correction, qui écrivent sur la copie plutôt que sur l'original."""
+    geom_type = QgsWkbTypes.displayString(layer.wkbType())
+    new_layer = QgsVectorLayer(f"{geom_type}?crs={layer.crs().authid()}", name, "memory")
+    provider = new_layer.dataProvider()
+    provider.addAttributes(layer.fields())
+    new_layer.updateFields()
+
+    new_features = []
+    for feature in layer.getFeatures():
+        feat = QgsFeature(new_layer.fields())
+        feat.setGeometry(QgsGeometry(feature.geometry()))
+        feat.setAttributes(feature.attributes())
+        new_features.append(feat)
+    provider.addFeatures(new_features)
+    new_layer.updateExtents()
+    return new_layer
+
+
 # ---------------------------------------------------------------------------
 # 1. Distance minimale entre les sommets
 # ---------------------------------------------------------------------------
@@ -100,20 +140,103 @@ def check_min_vertex_distance(layer, min_dist, min_area_ha=0):
     return issues
 
 
-def correct_min_vertex_distance(layer, min_dist, min_area_ha=0):
-    """Fusionne les sommets trop rapprochés via removeDuplicateNodes().
-    Retourne le nombre d'entités modifiées."""
-    modified = 0
-    layer.startEditing()
+# ---------------------------------------------------------------------------
+# Fusion ciblée des sommets CONSÉCUTIFS trop rapprochés
+# ---------------------------------------------------------------------------
+
+def _collapse_close_consecutive_points(ring, min_dist):
+    """Retourne un nouvel anneau (fermé) où chaque sommet trop proche
+    (< min_dist) de son PRÉDÉCESSEUR CONSERVÉ est retiré.
+
+    Contrairement à QgsGeometry.removeDuplicateNodes(), qui fusionne
+    n'importe quelle paire de sommets proches (même non consécutifs) et
+    peut donc effacer de vraies anomalies de proximité intra-géométrie
+    (sommets non adjacents rapprochés), cette fonction ne touche qu'aux
+    paires consécutives le long de l'anneau — exactement ce que vérifie
+    check_min_vertex_distance.
+
+    Ne descend jamais sous un anneau valide (au moins 3 sommets distincts).
+    """
+    if len(ring) < 4:
+        return list(ring)
+
+    pts = ring[:-1]  # anneau ouvert (le dernier point == le premier)
+    result = [pts[0]]
+    for pt in pts[1:]:
+        if result[-1].distance(pt) < min_dist:
+            continue  # trop proche du sommet précédent conservé : on saute
+        result.append(pt)
+
+    # Vérifier aussi la fermeture (dernier sommet conservé vs premier)
+    if len(result) >= 3 and result[-1].distance(result[0]) < min_dist:
+        result.pop()
+
+    if len(result) < 3:
+        return list(ring)  # ne pas dégénérer : garder l'anneau original
+
+    result.append(QgsPointXY(result[0]))  # refermer l'anneau
+    return result
+
+
+def _collapse_close_consecutive_vertices(geometry, min_dist):
+    """Applique _collapse_close_consecutive_points() à chaque anneau
+    (extérieur + trous) d'une géométrie polygone ou multi-polygone."""
+    if geometry.isMultipart():
+        new_parts = []
+        for polygon in geometry.asMultiPolygon():
+            new_parts.append(
+                [_collapse_close_consecutive_points(ring, min_dist) for ring in polygon])
+        return QgsGeometry.fromMultiPolygonXY(new_parts)
+    else:
+        new_rings = [_collapse_close_consecutive_points(ring, min_dist)
+                     for ring in geometry.asPolygon()]
+        return QgsGeometry.fromPolygonXY(new_rings)
+
+
+def correct_min_vertex_distance(layer, min_dist, min_area_ha=0, target_layer=None):
+    """Fusionne les sommets CONSÉCUTIFS trop rapprochés (voir
+    _collapse_close_consecutive_vertices) sans toucher aux sommets non
+    adjacents proches, afin de préserver les anomalies de proximité
+    intra-géométrie qui doivent rester détectables par
+    check_intra_geometry_proximity après cette correction.
+
+    Ne modifie JAMAIS `layer` : les corrections sont appliquées sur une
+    couche mémoire distincte.
+    - Si `target_layer` est fourni (ex. issue d'une correction précédente
+      dans la même exécution), les corrections y sont appliquées
+      directement, pour chaîner plusieurs corrections sans dupliquer la
+      couche à chaque étape.
+    - Sinon, une nouvelle couche mémoire "<nom>_corrige" est créée à
+      partir de `layer`.
+
+    Retourne (couche_corrigee, nombre_anomalies_corrigees). Le compte
+    est établi en revérifiant après coup (issues avant - issues restantes),
+    afin de rester comparable au nombre d'anomalies détectées, plutôt que
+    de compter des entités (une entité peut contenir plusieurs anomalies
+    résolues en une seule opération).
+    """
+    out_layer = target_layer if target_layer is not None \
+        else _duplicate_layer(layer, unique_layer_name(f"{layer.name()}_corrige"))
+
+    issues_avant = check_min_vertex_distance(out_layer, min_dist, min_area_ha)
+    fids_a_corriger = {issue["fid"] for issue in issues_avant}
+
+    out_layer.startEditing()
     try:
-        for feature in _features_to_process(layer, min_area_ha):
-            geom = QgsGeometry(feature.geometry())
-            if geom.removeDuplicateNodes(epsilon=min_dist, useZValues=False):
-                layer.changeGeometry(feature.id(), geom)
-                modified += 1
+        for feature in out_layer.getFeatures():
+            if feature.id() not in fids_a_corriger:
+                continue
+            geom = feature.geometry()
+            new_geom = _collapse_close_consecutive_vertices(geom, min_dist)
+            if new_geom is not None and not new_geom.isEmpty():
+                out_layer.changeGeometry(feature.id(), new_geom)
     finally:
-        layer.commitChanges()
-    return modified
+        out_layer.commitChanges()
+
+    issues_apres = check_min_vertex_distance(out_layer, min_dist, min_area_ha)
+    corrigees = len(issues_avant) - len(issues_apres)
+    return out_layer, corrigees
+
 
 
 # ---------------------------------------------------------------------------
@@ -139,20 +262,48 @@ def check_max_vertex_distance(layer, max_dist, min_area_ha=0):
     return issues
 
 
-def correct_max_vertex_distance(layer, max_dist, min_area_ha=0):
+def correct_max_vertex_distance(layer, max_dist, min_area_ha=0, target_layer=None):
     """Densifie les segments trop longs via densifyByDistance().
-    Retourne le nombre d'entités modifiées."""
-    modified = 0
-    layer.startEditing()
+
+    Seules les entités réellement identifiées par check_max_vertex_distance
+    (au moins un segment > max_dist) sont retraitées : densifyByDistance()
+    renvoie toujours une géométrie valide, même quand rien n'a besoin
+    d'être densifié, donc on ne peut pas s'y fier seule pour détecter un
+    changement réel.
+
+    Même logique que correct_min_vertex_distance par ailleurs : ne touche
+    jamais `layer`, écrit sur `target_layer` s'il est fourni (pour
+    chaîner avec une correction précédente), sinon crée "<nom>_corrige".
+
+    Retourne (couche_corrigee, nombre_anomalies_corrigees), établi en
+    revérifiant après coup (issues avant - issues restantes), pour rester
+    comparable au nombre d'anomalies détectées.
+    """
+    out_layer = target_layer if target_layer is not None \
+        else _duplicate_layer(layer, unique_layer_name(f"{layer.name()}_corrige"))
+
+    # Entités à retraiter, déterminées sur out_layer (et non sur `layer`) :
+    # out_layer a ses propres identifiants internes (réattribués par la
+    # couche mémoire), qui ne correspondent pas forcément à ceux de
+    # `layer`. Vérifier sur out_layer reflète aussi l'état déjà corrigé
+    # par une éventuelle étape précédente (ex. correction min. sommets).
+    issues_avant = check_max_vertex_distance(out_layer, max_dist, min_area_ha)
+    fids_a_corriger = {issue["fid"] for issue in issues_avant}
+
+    out_layer.startEditing()
     try:
-        for feature in _features_to_process(layer, min_area_ha):
+        for feature in out_layer.getFeatures():
+            if feature.id() not in fids_a_corriger:
+                continue
             densified = feature.geometry().densifyByDistance(max_dist)
             if densified is not None and not densified.isEmpty():
-                layer.changeGeometry(feature.id(), densified)
-                modified += 1
+                out_layer.changeGeometry(feature.id(), densified)
     finally:
-        layer.commitChanges()
-    return modified
+        out_layer.commitChanges()
+
+    issues_apres = check_max_vertex_distance(out_layer, max_dist, min_area_ha)
+    corrigees = len(issues_avant) - len(issues_apres)
+    return out_layer, corrigees
 
 
 # ---------------------------------------------------------------------------
@@ -166,47 +317,62 @@ def _segment_distance(a1, a2, b1, b2):
 
 
 def check_intra_geometry_proximity(layer, tolerance, min_area_ha=0):
-    """Détecte les paires de segments NON ADJACENTS d'une même entité
-    dont la distance est inférieure à `tolerance`.
+    """Détecte les SOMMETS d'une même entité qui ont au moins un autre
+    sommet de la même entité (adjacent ou non, tous anneaux/parties
+    confondus) à moins de `tolerance`.
+
+    IMPORTANT : contrairement à une intuition "segment à segment", ce
+    contrôle compare les SOMMETS entre eux, sans exclure les paires
+    consécutives. En pratique, deux sommets consécutifs "normaux" sont
+    presque toujours bien plus éloignés que `tolerance`, donc ça ne
+    déclenche que pour de vrais segments dégénérés (déjà repérés par
+    check_min_vertex_distance) ou pour de vrais sommets non adjacents
+    rapprochés (auto-approche du contour). Une anomalie est rapportée
+    par SOMMET concerné (dédoublonné), pas par paire — un sommet partagé
+    entre deux paires proches n'est donc compté qu'une seule fois.
+
+    Ce comportement a été déterminé empiriquement en comparant, point par
+    point, les résultats de l'outil de référence (GSFGIS) sur un jeu de
+    données de test : chacune de ses anomalies "Intra-géométrie" coïncidait
+    exactement avec un sommet déjà présent dans une paire de
+    "distance minimale entre sommets", jamais avec un milieu de segment
+    calculé — d'où l'abandon de l'ancienne approche segment-à-segment.
 
     ATTENTION : O(n²) par entité. Pour des polygones très détaillés,
     envisager un filtre de superficie minimale pour limiter la charge.
 
-    Retourne [{"fid", "point", "distance"}].
+    Retourne [{"fid", "point", "distance"}] (une entrée par sommet
+    concerné ; "distance" est la plus petite distance trouvée vers un
+    autre sommet de la même entité).
     """
     issues = []
     for feature in _features_to_process(layer, min_area_ha):
         geom = feature.geometry()
-        segments = []
-        for part_idx, ring_idx, ring in _iter_rings(geom):
-            ring_key = (part_idx, ring_idx)
-            for i in range(len(ring) - 1):
-                segments.append((ring_key, i, ring[i], ring[i + 1]))
 
-        ring_lengths = {}
-        for part_idx, ring_idx, ring in _iter_rings(geom):
-            ring_lengths[(part_idx, ring_idx)] = len(ring) - 1
+        # Tous les sommets de l'entité, tous anneaux/parties confondus,
+        # anneaux ouverts (le point de fermeture, identique au premier,
+        # n'est pas répété).
+        all_verts = []
+        for _p, _r, ring in _iter_rings(geom):
+            all_verts.extend(ring[:-1])
 
-        n = len(segments)
+        n = len(all_verts)
+        min_dist_par_sommet = {}
         for i in range(n):
-            key_i, seg_i, a1, a2 = segments[i]
             for j in range(i + 1, n):
-                key_j, seg_j, b1, b2 = segments[j]
-
-                if key_i == key_j:
-                    if abs(seg_i - seg_j) <= 1:
-                        continue
-                    ring_len = ring_lengths[key_i]
-                    if {seg_i, seg_j} == {0, ring_len - 1}:
-                        continue
-
-                d = _segment_distance(a1, a2, b1, b2)
+                d = all_verts[i].distance(all_verts[j])
                 if d < tolerance:
-                    mid = QgsPointXY(
-                        (a1.x() + a2.x() + b1.x() + b2.x()) / 4.0,
-                        (a1.y() + a2.y() + b1.y() + b2.y()) / 4.0,
-                    )
-                    issues.append({"fid": feature.id(), "point": mid, "distance": d})
+                    if i not in min_dist_par_sommet or d < min_dist_par_sommet[i]:
+                        min_dist_par_sommet[i] = d
+                    if j not in min_dist_par_sommet or d < min_dist_par_sommet[j]:
+                        min_dist_par_sommet[j] = d
+
+        for idx, d in min_dist_par_sommet.items():
+            issues.append({
+                "fid": feature.id(),
+                "point": QgsPointXY(all_verts[idx]),
+                "distance": d,
+            })
     return issues
 
 
@@ -214,10 +380,23 @@ def check_intra_geometry_proximity(layer, tolerance, min_area_ha=0):
 # 4. Proximité des segments inter-géométrie
 # ---------------------------------------------------------------------------
 
-def check_inter_geometry_proximity(layer, tolerance, min_area_ha=0):
+def check_inter_geometry_proximity(layer, tolerance, min_area_ha=0,
+                                    coincidence_epsilon=1e-6):
     """Détecte les paires de segments appartenant à deux entités
     différentes dont la distance est inférieure à `tolerance`.
     Utilise un index spatial pour limiter les comparaisons.
+
+    IMPORTANT : deux polygones adjacents qui partagent légitimement une
+    bordure (cas normal dans une mosaïque de blocs) ont des segments
+    coïncidents, donc à distance ~0 le long de toute la bordure commune.
+    Ce n'est PAS une anomalie. `coincidence_epsilon` définit le seuil en
+    dessous duquel une distance est considérée comme une coïncidence de
+    bordure valide (à cause des imprécisions flottantes, une bordure
+    parfaitement partagée ne donne pas toujours exactement 0.0) plutôt
+    que comme une vraie anomalie de proximité. Seules les distances
+    strictement comprises entre `coincidence_epsilon` et `tolerance`
+    (un vrai interstice ou "sliver", ni coïncident ni assez éloigné)
+    sont retenues comme anomalies.
 
     Retourne [{"fid_a", "fid_b", "point", "distance"}].
     """
@@ -259,7 +438,7 @@ def check_inter_geometry_proximity(layer, tolerance, min_area_ha=0):
             for a1, a2 in segments_a:
                 for b1, b2 in segments_b:
                     d = _segment_distance(a1, a2, b1, b2)
-                    if d < tolerance:
+                    if coincidence_epsilon < d < tolerance:
                         mid = QgsPointXY(
                             (a1.x() + a2.x() + b1.x() + b2.x()) / 4.0,
                             (a1.y() + a2.y() + b1.y() + b2.y()) / 4.0,
@@ -341,3 +520,158 @@ def build_issues_point_layer(issues, crs, layer_name, extra_fields=None):
     provider.addFeatures(new_features)
     mem_layer.updateExtents()
     return mem_layer
+
+
+# ---------------------------------------------------------------------------
+# Normalisation et fusion des anomalies dans une seule couche
+# ---------------------------------------------------------------------------
+
+def normalize_issues(issues, type_label, value_key, fid_key="fid", fid_b_key=None, value_suffix=""):
+    """Convertit une liste d'anomalies brutes (format spécifique à chaque
+    check_...) en une liste de dictionnaires au format commun :
+        {"type", "fid", "fid_b", "point", "valeur"}
+
+    - `type_label` : étiquette affichée dans le champ "type" de la couche
+      finale (ex. "Distance min. entre sommets").
+    - `value_key` : nom de la clé contenant la valeur numérique à afficher
+      (ex. "distance", "angle").
+    - `fid_key` / `fid_b_key` : noms des clés d'identifiant d'entité dans
+      les dictionnaires source (varient selon le contrôle : "fid" seul,
+      ou "fid_a"/"fid_b" pour la proximité inter-géométrie).
+    - `value_suffix` : suffixe d'affichage (" m", "°", ...).
+
+    Si l'anomalie ne contient pas de clé "point" mais bien
+    "point_debut"/"point_fin" (cas de check_max_vertex_distance), le point
+    milieu du segment est utilisé.
+    """
+    normalized = []
+    for issue in issues:
+        point = issue.get("point")
+        if point is None and "point_debut" in issue and "point_fin" in issue:
+            p1, p2 = issue["point_debut"], issue["point_fin"]
+            point = QgsPointXY((p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0)
+        if point is None:
+            continue
+
+        value = issue.get(value_key)
+        valeur_txt = f"{value:.2f}{value_suffix}" if value is not None else ""
+
+        entry = {
+            "type": type_label,
+            "fid": issue.get(fid_key),
+            "fid_b": issue.get(fid_b_key) if fid_b_key else None,
+            "point": point,
+            "valeur": valeur_txt,
+        }
+        normalized.append(entry)
+    return normalized
+
+
+def build_combined_point_layer(anomalies, crs, layer_name):
+    """Construit une seule couche mémoire de points regroupant toutes les
+    anomalies déjà normalisées (via normalize_issues), distinguées par le
+    champ "type". Retourne None si `anomalies` est vide."""
+    if not anomalies:
+        return None
+
+    mem_layer = QgsVectorLayer(f"Point?crs={crs.authid()}", layer_name, "memory")
+    provider = mem_layer.dataProvider()
+
+    fields = QgsFields()
+    fields.append(QgsField("type", QVariant.String))
+    fields.append(QgsField("fid", QVariant.LongLong))
+    fields.append(QgsField("fid_b", QVariant.LongLong))
+    fields.append(QgsField("valeur", QVariant.String))
+    provider.addAttributes(fields)
+    mem_layer.updateFields()
+
+    new_features = []
+    for anomaly in anomalies:
+        point = anomaly.get("point")
+        if point is None:
+            continue
+        feat = QgsFeature(mem_layer.fields())
+        feat.setGeometry(QgsGeometry.fromPointXY(point))
+        feat.setAttributes([
+            anomaly.get("type"),
+            anomaly.get("fid"),
+            anomaly.get("fid_b"),
+            anomaly.get("valeur"),
+        ])
+        new_features.append(feat)
+
+    provider.addFeatures(new_features)
+    mem_layer.updateExtents()
+    return mem_layer
+
+
+# ---------------------------------------------------------------------------
+# Symbologie catégorisée de la couche d'erreurs (une couleur par "type")
+# ---------------------------------------------------------------------------
+
+# Palette de couleurs distinctes (issue de ColorBrewer "Set1"), suffisante
+# pour les 5 types d'anomalies possibles ; se répète au-delà si jamais de
+# nouveaux types de contrôle sont ajoutés.
+_PALETTE_TYPES = [
+    QColor("#e41a1c"),  # rouge
+    QColor("#377eb8"),  # bleu
+    QColor("#4daf4a"),  # vert
+    QColor("#984ea3"),  # violet
+    QColor("#ff7f00"),  # orange
+    QColor("#ffff33"),  # jaune
+    QColor("#a65628"),  # brun
+]
+
+
+# Libellés "type" connus, dans l'ordre voulu pour la légende — doivent
+# rester synchronisés avec les `type_label` passés à normalize_issues()
+# dans ratf_qgis_dialog.py.
+ALL_ERROR_TYPES = [
+    "Distance min. entre sommets",
+    "Distance max. entre sommets",
+    "Proximité intra-géométrie",
+    "Proximité inter-géométrie",
+    "Angles interne de bordure",
+]
+
+
+def apply_error_type_symbology(layer, field_name="type", symbol_size=1.5, all_types=None):
+    """Applique une symbologie catégorisée à `layer` (couche de points
+    d'erreurs produite par build_combined_point_layer), une couleur
+    distincte par valeur unique du champ `field_name` (par défaut "type").
+
+    Toutes les valeurs de `all_types` (par défaut ALL_ERROR_TYPES) figurent
+    dans la légende, même si aucune entité de ce type n'est présente dans
+    la couche pour cette exécution — pratique pour comparer visuellement
+    plusieurs exécutions avec une légende toujours complète et cohérente.
+    Toute valeur trouvée dans les données mais absente de `all_types` est
+    tout de même ajoutée à la suite (par ordre alphabétique), pour ne
+    jamais perdre silencieusement une catégorie inattendue.
+
+    Modifie `layer` en place (son renderer) et déclenche un rafraîchissement
+    de l'affichage. Ne fait rien si le champ n'existe pas sur la couche.
+    """
+    if layer is None or layer.fields().indexFromName(field_name) < 0:
+        return
+
+    valeurs_connues = list(all_types) if all_types is not None else list(ALL_ERROR_TYPES)
+
+    valeurs_presentes = {
+        f[field_name] for f in layer.getFeatures()
+        if f[field_name] not in (None, "")
+    }
+    valeurs_inattendues = sorted(valeurs_presentes - set(valeurs_connues))
+
+    valeurs = valeurs_connues + valeurs_inattendues
+    if not valeurs:
+        return
+
+    categories = []
+    for i, valeur in enumerate(valeurs):
+        symbol = QgsMarkerSymbol.createSimple({"name": "circle", "size": str(symbol_size)})
+        symbol.setColor(_PALETTE_TYPES[i % len(_PALETTE_TYPES)])
+        categories.append(QgsRendererCategory(valeur, symbol, str(valeur)))
+
+    renderer = QgsCategorizedSymbolRenderer(field_name, categories)
+    layer.setRenderer(renderer)
+    layer.triggerRepaint()

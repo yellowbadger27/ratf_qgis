@@ -5,7 +5,7 @@
 [general]
 name=RATF-QGIS
 qgisMinimumVersion=3.34
-description=Validation géométrique RATD pour QGIS
+description=Validation géométrique RATF pour QGIS
 version=0.1.0
 author=JFB
 email=jessicaf.bolduc@horizon-sf.com
