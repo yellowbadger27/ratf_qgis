@@ -1,2 +1,0 @@
-# ratf_qgis
-

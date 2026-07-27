@@ -6,21 +6,16 @@ Algorithmes de vérification et de correction géométrique pour les couches
 de polygones, utilisés par RatfQgisDialog.
 
 Contrôles implémentés :
-    1. Distance minimale entre les sommets    (vérifier / corriger)
-    2. Distance maximale entre les sommets    (vérifier / corriger)
-    3. Proximité des segments intra-géométrie (détecter / montrer)
-    4. Proximité des segments inter-géométrie (détecter / montrer)
-    5. Angles internes de bordures             (détecter / montrer)
-    6. Superficie minimale à considérer         (filtre appliqué aux 1-5)
+    1. Distance minimale entre les sommets    
+    2. Distance maximale entre les sommets    
+    3. Proximité des segments intra-géométrie 
+    4. Proximité des segments inter-géométrie 
+    5. Angles internes de bordures             
+    6. Superficie minimale à considérer         
 
 Les distances/angles sont exprimés dans l'unité du CRS de la couche
 (généralement des mètres pour un CRS projeté) ; les angles en degrés.
 
-NOTE : ce module a été rédigé pour l'API PyQGIS mais n'a pas pu être
-exécuté dans un vrai QGIS lors de sa génération (environnement de
-développement sans QGIS installé). À tester sur un petit jeu de
-données avant un usage en production, en particulier les contrôles de
-proximité de segments (les plus coûteux en calcul).
 """
 
 import math
@@ -69,7 +64,7 @@ def _iter_rings(geometry):
 
 
 def _feature_area_hectares(geometry):
-    """Superficie en hectares. Hypothèse : CRS projeté en mètres."""
+    """Superficie en hectares. """
     return geometry.area() / 10000.0
 
 
@@ -148,13 +143,6 @@ def _collapse_close_consecutive_points(ring, min_dist):
     """Retourne un nouvel anneau (fermé) où chaque sommet trop proche
     (< min_dist) de son PRÉDÉCESSEUR CONSERVÉ est retiré.
 
-    Contrairement à QgsGeometry.removeDuplicateNodes(), qui fusionne
-    n'importe quelle paire de sommets proches (même non consécutifs) et
-    peut donc effacer de vraies anomalies de proximité intra-géométrie
-    (sommets non adjacents rapprochés), cette fonction ne touche qu'aux
-    paires consécutives le long de l'anneau — exactement ce que vérifie
-    check_min_vertex_distance.
-
     Ne descend jamais sous un anneau valide (au moins 3 sommets distincts).
     """
     if len(ring) < 4:
@@ -196,9 +184,7 @@ def _collapse_close_consecutive_vertices(geometry, min_dist):
 def correct_min_vertex_distance(layer, min_dist, min_area_ha=0, target_layer=None):
     """Fusionne les sommets CONSÉCUTIFS trop rapprochés (voir
     _collapse_close_consecutive_vertices) sans toucher aux sommets non
-    adjacents proches, afin de préserver les anomalies de proximité
-    intra-géométrie qui doivent rester détectables par
-    check_intra_geometry_proximity après cette correction.
+    adjacents proches.
 
     Ne modifie JAMAIS `layer` : les corrections sont appliquées sur une
     couche mémoire distincte.
@@ -209,11 +195,7 @@ def correct_min_vertex_distance(layer, min_dist, min_area_ha=0, target_layer=Non
     - Sinon, une nouvelle couche mémoire "<nom>_corrige" est créée à
       partir de `layer`.
 
-    Retourne (couche_corrigee, nombre_anomalies_corrigees). Le compte
-    est établi en revérifiant après coup (issues avant - issues restantes),
-    afin de rester comparable au nombre d'anomalies détectées, plutôt que
-    de compter des entités (une entité peut contenir plusieurs anomalies
-    résolues en une seule opération).
+    Retourne (couche_corrigee, nombre_anomalies_corrigees). 
     """
     out_layer = target_layer if target_layer is not None \
         else _duplicate_layer(layer, unique_layer_name(f"{layer.name()}_corrige"))
@@ -265,28 +247,11 @@ def check_max_vertex_distance(layer, max_dist, min_area_ha=0):
 def correct_max_vertex_distance(layer, max_dist, min_area_ha=0, target_layer=None):
     """Densifie les segments trop longs via densifyByDistance().
 
-    Seules les entités réellement identifiées par check_max_vertex_distance
-    (au moins un segment > max_dist) sont retraitées : densifyByDistance()
-    renvoie toujours une géométrie valide, même quand rien n'a besoin
-    d'être densifié, donc on ne peut pas s'y fier seule pour détecter un
-    changement réel.
-
-    Même logique que correct_min_vertex_distance par ailleurs : ne touche
-    jamais `layer`, écrit sur `target_layer` s'il est fourni (pour
-    chaîner avec une correction précédente), sinon crée "<nom>_corrige".
-
-    Retourne (couche_corrigee, nombre_anomalies_corrigees), établi en
-    revérifiant après coup (issues avant - issues restantes), pour rester
-    comparable au nombre d'anomalies détectées.
+    Retourne (couche_corrigee, nombre_anomalies_corrigees).
     """
     out_layer = target_layer if target_layer is not None \
         else _duplicate_layer(layer, unique_layer_name(f"{layer.name()}_corrige"))
 
-    # Entités à retraiter, déterminées sur out_layer (et non sur `layer`) :
-    # out_layer a ses propres identifiants internes (réattribués par la
-    # couche mémoire), qui ne correspondent pas forcément à ceux de
-    # `layer`. Vérifier sur out_layer reflète aussi l'état déjà corrigé
-    # par une éventuelle étape précédente (ex. correction min. sommets).
     issues_avant = check_max_vertex_distance(out_layer, max_dist, min_area_ha)
     fids_a_corriger = {issue["fid"] for issue in issues_avant}
 
@@ -331,13 +296,6 @@ def check_intra_geometry_proximity(layer, tolerance, min_area_ha=0):
     par SOMMET concerné (dédoublonné), pas par paire — un sommet partagé
     entre deux paires proches n'est donc compté qu'une seule fois.
 
-    Ce comportement a été déterminé empiriquement en comparant, point par
-    point, les résultats de l'outil de référence (GSFGIS) sur un jeu de
-    données de test : chacune de ses anomalies "Intra-géométrie" coïncidait
-    exactement avec un sommet déjà présent dans une paire de
-    "distance minimale entre sommets", jamais avec un milieu de segment
-    calculé — d'où l'abandon de l'ancienne approche segment-à-segment.
-
     ATTENTION : O(n²) par entité. Pour des polygones très détaillés,
     envisager un filtre de superficie minimale pour limiter la charge.
 
@@ -349,9 +307,6 @@ def check_intra_geometry_proximity(layer, tolerance, min_area_ha=0):
     for feature in _features_to_process(layer, min_area_ha):
         geom = feature.geometry()
 
-        # Tous les sommets de l'entité, tous anneaux/parties confondus,
-        # anneaux ouverts (le point de fermeture, identique au premier,
-        # n'est pas répété).
         all_verts = []
         for _p, _r, ring in _iter_rings(geom):
             all_verts.extend(ring[:-1])
@@ -486,7 +441,7 @@ def check_internal_angles(layer, min_angle_deg, min_area_ha=0):
 # ---------------------------------------------------------------------------
 
 def build_issues_point_layer(issues, crs, layer_name, extra_fields=None):
-    """Construit une couche mémoire de points à partir des anomalies
+    """Construit une couche mémoire de points à partir des erreurs
     détectées, pour affichage dans le projet QGIS."""
     extra_fields = extra_fields or []
 
@@ -642,8 +597,7 @@ def apply_error_type_symbology(layer, field_name="type", symbol_size=1.5, all_ty
 
     Toutes les valeurs de `all_types` (par défaut ALL_ERROR_TYPES) figurent
     dans la légende, même si aucune entité de ce type n'est présente dans
-    la couche pour cette exécution — pratique pour comparer visuellement
-    plusieurs exécutions avec une légende toujours complète et cohérente.
+    la couche pour cette exécution.
     Toute valeur trouvée dans les données mais absente de `all_types` est
     tout de même ajoutée à la suite (par ordre alphabétique), pour ne
     jamais perdre silencieusement une catégorie inattendue.
