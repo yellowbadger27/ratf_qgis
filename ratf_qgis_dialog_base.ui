@@ -23,7 +23,7 @@
    </size>
   </property>
   <property name="windowTitle">
-   <string>RATF-QGIS</string>
+   <string>Géométrie RATF</string>
   </property>
   <widget class="QGroupBox" name="grpLayers">
    <property name="geometry">

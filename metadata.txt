@@ -3,14 +3,14 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=RATF-QGIS
+name=Géométrie RATF
 qgisMinimumVersion=3.34
 description=Validation géométrique RATF pour QGIS
 version=0.1.0
 author=JFB
 email=jessicaf.bolduc@horizon-sf.com
 
-about=Plugin permettant de valider les géométries polygonales selon les normes RATF/PRAN.
+about=Outil permettant de valider les géométries polygonales selon les normes RATF/PRAN.    
 
 tracker=https://github.com/yellowbadger27/RATF-QGIS
 repository=https://github.com/yellowbadger27/RATF-QGIS/issues
@@ -40,7 +40,7 @@ deprecated=False
 # plugin_dependencies=
 
 Category of the plugin: Raster, Vector, Database or Web
-# category=
+# category=Vector
 
 # If the plugin can run on QGIS Server.
 server=False
