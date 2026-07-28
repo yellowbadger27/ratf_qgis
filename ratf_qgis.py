@@ -60,8 +60,7 @@ class RatfQgis:
 
         # Declare instance attributes
         self.actions = []
-        self.menu = self.tr(u'&Géométrie RATF')
-        self.toolbar = None
+        self.menu = self.tr(u'&RATF-QGIS')
 
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
@@ -145,8 +144,8 @@ class RatfQgis:
             action.setWhatsThis(whats_this)
 
         if add_to_toolbar:
-            # Adds plugin icon to its own dedicated toolbar
-            self.toolbar.addAction(action)
+            # Adds plugin icon to Plugins toolbar
+            self.iface.addToolBarIcon(action)
 
         if add_to_menu:
             self.iface.addPluginToVectorMenu(
@@ -159,10 +158,6 @@ class RatfQgis:
 
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
-
-        # Create a dedicated toolbar for this plugin
-        self.toolbar = self.iface.addToolBar(u'Géométrie RATF')
-        self.toolbar.setObjectName(u'Géométrie RATF')
 
         icon_path = os.path.join(os.path.dirname(__file__), 'icon.png')
         self.add_action(
@@ -179,9 +174,9 @@ class RatfQgis:
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
             self.iface.removePluginVectorMenu(
-                self.tr(u'&Géométrie RATF'),
+                self.tr(u'&RATF-QGIS'),
                 action)
-        del self.toolbar
+            self.iface.removeToolBarIcon(action)
 
 
     def run(self):
@@ -189,16 +184,13 @@ class RatfQgis:
 
         # Create the dialog with elements (after translation) and keep reference
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
+        if self.first_start:
             self.first_start = False
             self.dlg = RatfQgisDialog()
 
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
-        result = self.dlg.exec_()
-        # See if OK was pressed
-        if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
-            pass
+        result = self.dlg.exec()
+    
+

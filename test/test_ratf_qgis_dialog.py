@@ -14,7 +14,6 @@ __copyright__ = 'Copyright 2026, JFB'
 
 import unittest
 
-from qgis.core import Qgis
 from qgis.PyQt.QtWidgets import QDialogButtonBox, QDialog
 
 from ratf_qgis_dialog import RatfQgisDialog
@@ -22,16 +21,10 @@ from ratf_qgis_dialog import RatfQgisDialog
 from utilities import get_qgis_app
 QGIS_APP = get_qgis_app()
 
-if Qgis.QGIS_VERSION_INT >= 40000:
-    OK_BUTTON = QDialogButtonBox.StandardButton.Ok
-    CANCEL_BUTTON = QDialogButtonBox.StandardButton.Cancel
-    ACCEPTED = QDialog.DialogCode.Accepted
-    REJECTED = QDialog.DialogCode.Rejected
-else:
-    OK_BUTTON = QDialogButtonBox.Ok
-    CANCEL_BUTTON = QDialogButtonBox.Cancel
-    ACCEPTED = QDialog.Accepted
-    REJECTED = QDialog.Rejected
+OK_BUTTON = QDialogButtonBox.StandardButton.Ok
+CANCEL_BUTTON = QDialogButtonBox.StandardButton.Cancel
+ACCEPTED = QDialog.DialogCode.Accepted
+REJECTED = QDialog.DialogCode.Rejected
 
 
 class RatfQgisDialogTest(unittest.TestCase):

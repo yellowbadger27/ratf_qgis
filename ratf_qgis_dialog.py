@@ -46,8 +46,7 @@ FORM_CLASS, _ = uic.loadUiType(
 
 def _s(n):
     """Retourne 's' si n > 1, sinon une chaîne vide (accord français :
-    0 et 1 restent au singulier, comme dans '0 erreur' / '1 erreur' /
-    '2 erreurs')."""
+    0 et 1 restent au singulier."""
     return "s" if n > 1 else ""
 
 
@@ -89,7 +88,7 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _load_parametres(self):
         """Restaure les cases à cocher et valeurs numériques enregistrées
-        lors de la dernière utilisation du plugin (QgsSettings). Si aucun
+        lors de la dernière utilisation du plugin. Si aucun
         réglage n'a encore été enregistré, la valeur actuelle du widget
         (celle définie dans le .ui) sert de valeur par défaut."""
         settings = QgsSettings()
@@ -108,7 +107,7 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def _save_parametres(self):
         """Enregistre l'état actuel des cases à cocher et valeurs
-        numériques (QgsSettings), pour les restaurer à la prochaine
+        numériques pour les restaurer à la prochaine
         ouverture du plugin."""
         settings = QgsSettings()
         settings.beginGroup("ratf_qgis/parametres")
@@ -132,12 +131,9 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         """Charge toutes les couches polygonales du projet dans la liste.
  
         Si `layer_a_selectionner` est fourni, cette couche est re-cochée
-        après le rechargement — utile pour rafraîchir la liste en cours
-        d'utilisation (ex. après l'ajout d'une couche corrigée) sans faire
-        perdre la sélection en cours."""
+        après le rechargement."""
  
-        # Éviter que le recochage ci-dessous ne déclenche on_layer_checked
-        # pendant qu'on reconstruit la liste.
+        # Éviter que le recochage ci-dessous ne déclenche on_layer_checked pendant qu'on reconstruit la liste.
         self.lstPolygonLayers.blockSignals(True)
  
         # Vider la liste
@@ -147,16 +143,16 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         for layer in QgsProject.instance().mapLayers().values():
  
             # Vérifier que c'est une couche vecteur polygonale
-            if layer.type() == QgsMapLayer.VectorLayer and \
-                    layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            if layer.type() == QgsMapLayer.LayerType.VectorLayer and \
+                    layer.geometryType() == QgsWkbTypes.GeometryType.PolygonGeometry:
                 
                 item = QListWidgetItem(layer.name())                                       
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 coche = (layer_a_selectionner is not None
                          and layer.id() == layer_a_selectionner.id())
-                item.setCheckState(Qt.Checked if coche else Qt.Unchecked)
+                item.setCheckState(Qt.CheckState.Checked if coche else Qt.CheckState.Unchecked)
                 # Sauvegarder directement la couche
-                item.setData(Qt.UserRole, layer)
+                item.setData(Qt.ItemDataRole.UserRole, layer)
                 self.lstPolygonLayers.addItem(item)
  
         self.lstPolygonLayers.blockSignals(False)
@@ -164,7 +160,7 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
     def on_layer_checked(self, current_item):
         """Permet une seule couche sélectionnée à la fois."""
 
-        if current_item.checkState() != Qt.Checked:
+        if current_item.checkState() != Qt.CheckState.Checked:
             return
         
         self.lstPolygonLayers.blockSignals(True)
@@ -172,7 +168,7 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
             item = self.lstPolygonLayers.item(i)
 
             if item != current_item:
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(Qt.CheckState.Unchecked)
 
         self.lstPolygonLayers.blockSignals(False)
 
@@ -182,8 +178,8 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         for i in range(self.lstPolygonLayers.count()):
             item = self.lstPolygonLayers.item(i)
 
-            if item.checkState() == Qt.Checked:
-                return item.data(Qt.UserRole)
+            if item.checkState() == Qt.CheckState.Checked:
+                return item.data(Qt.ItemDataRole.UserRole)
             
         return None
     
@@ -202,7 +198,7 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
 
         progress = QProgressDialog(
             f"Traitement de la couche « {layer.name()} »...", "Annuler", 0, 5, self)
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
 
         rapport = [f"Opération terminée"]
@@ -214,12 +210,8 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
 
         # Couche cible des CORRECTIONS uniquement (pour les enchaîner entre
         # elles sans dupliquer la couche à chaque étape). Les CONTRÔLES DE
-        # DÉTECTION (check_*), eux, portent toujours sur `layer` d'origine :
-        # on a confirmé, en comparant point par point avec l'outil de
-        # référence (coordonnées identiques à la géométrie non corrigée),
-        # que ses détections ne sont jamais chaînées sur une correction
-        # précédente au sein d'une même exécution. `layer` lui-même n'est
-        # jamais modifié ; seule `couche_courante` (la copie mémoire) l'est.
+        # DÉTECTION (check_*), eux, portent toujours sur `layer` d'origine
+    
         couche_courante = layer
         couche_corrigee = False
 
