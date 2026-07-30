@@ -62,6 +62,12 @@ class RatfQgis:
         self.actions = []
         self.menu = self.tr(u'&RATF-QGIS')
 
+        # Créer une barre d'outils propre au plugin (indépendante de celle
+        # partagée "Plugins"), afin qu'elle soit déplaçable/détachable
+        # séparément dans l'interface de QGIS.
+        self.toolbar = self.iface.addToolBar(u'RatfQgis')
+        self.toolbar.setObjectName(u'RatfQgis')
+
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
         self.first_start = None
@@ -144,8 +150,8 @@ class RatfQgis:
             action.setWhatsThis(whats_this)
 
         if add_to_toolbar:
-            # Adds plugin icon to Plugins toolbar
-            self.iface.addToolBarIcon(action)
+            # Ajoute l'icône à la barre d'outils propre au plugin
+            self.toolbar.addAction(action)
 
         if add_to_menu:
             self.iface.addPluginToVectorMenu(
@@ -176,7 +182,8 @@ class RatfQgis:
             self.iface.removePluginVectorMenu(
                 self.tr(u'&RATF-QGIS'),
                 action)
-            self.iface.removeToolBarIcon(action)
+        # Supprimer la barre d'outils propre au plugin (et ses icônes avec elle)
+        del self.toolbar
 
 
     def run(self):
@@ -191,6 +198,6 @@ class RatfQgis:
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
-        result = self.dlg.exec()
+        self.dlg.exec()
     
 

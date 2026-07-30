@@ -4,11 +4,11 @@
 name=Géométrie RATF
 qgisMinimumVersion=3.34
 description=Validation géométrique RATF pour QGIS
-version=0.1.1
+version=0.1.2
 author=JFB
 email=jessicaf.bolduc@horizon-sf.com
 
-about=Outil permettant de valider les géométries polygonales selon les normes RATF/PRAN.    
+about=Outil permettant de valider les géométries polygonales selon les normes RATF/PRAN. Validates polygon geometry according to the RATF/PRAN standard.    
 
 tracker=https://github.com/yellowbadger27/ratf_qgis
 repository=https://github.com/yellowbadger27/ratf_qgis
