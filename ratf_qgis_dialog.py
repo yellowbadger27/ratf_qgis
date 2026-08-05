@@ -52,8 +52,7 @@ def _s(n):
 
 class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
 
-    # Noms des widgets de paramètres (cases à cocher + valeurs numériques)
-    # dont l'état doit persister d'une ouverture du plugin à l'autre.
+    # Noms des widgets de paramètres (cases à cocher + valeurs numériques) dont l'état doit persister d'une ouverture du plugin à l'autre.
     _PARAM_WIDGETS = [
         "chkVerifyMinVertex", "chkCorrectMinVertex",
         "chkVerifyMaxVertex", "chkCorrectMaxVertex",
@@ -120,9 +119,8 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def showEvent(self, event):
         """Rafraîchit la liste des couches polygonales à chaque affichage
-        du dialogue (utile car le dialogue n'est créé qu'une seule fois
-        et réutilisé ensuite — voir ratf_qgis.py). La couche actuellement
-        sélectionnée, le cas échéant, reste cochée après le rafraîchissement."""
+        du dialogue. La couche actuellement sélectionnée, le cas échéant, 
+        reste cochée après le rafraîchissement."""
         self.load_polygon_layers(layer_a_selectionner=self.selected_layer())
         super(RatfQgisDialog, self).showEvent(event)
 
