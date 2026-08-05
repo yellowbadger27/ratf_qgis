@@ -75,9 +75,6 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
 
-        # Charger les couches polygonales
-        self.load_polygon_layers()
-
         # Restaurer les paramètres de la dernière utilisation
         self._load_parametres()
 
@@ -120,6 +117,14 @@ class RatfQgisDialog(QtWidgets.QDialog, FORM_CLASS):
             elif hasattr(widget, "value"):
                 settings.setValue(name, widget.value())
         settings.endGroup()
+
+    def showEvent(self, event):
+        """Rafraîchit la liste des couches polygonales à chaque affichage
+        du dialogue (utile car le dialogue n'est créé qu'une seule fois
+        et réutilisé ensuite — voir ratf_qgis.py). La couche actuellement
+        sélectionnée, le cas échéant, reste cochée après le rafraîchissement."""
+        self.load_polygon_layers(layer_a_selectionner=self.selected_layer())
+        super(RatfQgisDialog, self).showEvent(event)
 
     def closeEvent(self, event):
         """Sauvegarde les paramètres à la fermeture du dialogue, que ce
